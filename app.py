@@ -8,7 +8,7 @@ st.set_page_config(page_title="Word 轉換神器", page_icon="🖨️", layout="
 st.title("阿凱老師的 Word 轉換神器 🖨️")
 
 # =======================================================
-# 轉檔引擎初始化 (已加上 filter='data' 修正警告)
+# 轉檔引擎初始化
 # =======================================================
 PANDOC_VERSION = "3.1.1"
 PANDOC_DIR = "/tmp/pandoc_bin"
@@ -31,10 +31,6 @@ os.environ["PYPANDOC_PANDOC"] = PANDOC_EXE
 # 狀態管理 (Session State) 與功能函式
 # =======================================================
 if "input_text" not in st.session_state:
-    st.session_state["input_text"] = ""
-
-def clear_text():
-    """一鍵清空文字框"""
     st.session_state["input_text"] = ""
 
 def load_uploaded_file():
@@ -69,7 +65,10 @@ with col1:
                      on_change=load_uploaded_file)
 with col2:
     st.markdown("<br>", unsafe_allow_html=True) # 調整按鈕對齊高度
-    st.button("🗑️ 一鍵清空", on_click=clear_text, use_container_width=True)
+    # 【修正痛點】使用強制重整 (rerun) 來解決清空按鈕被系統忽略的問題
+    if st.button("🗑️ 一鍵清空", use_container_width=True):
+        st.session_state["input_text"] = ""
+        st.rerun()
 
 # 核心文字輸入框
 text_input = st.text_area(
@@ -78,7 +77,7 @@ text_input = st.text_area(
     height=350
 )
 
-# 【解決痛點】加入一個明顯的輔助按鈕，讓使用者點擊後觸發畫面更新
+# 加入明顯的輔助按鈕，讓使用者點擊後觸發畫面更新
 st.button("👀 貼上內容後，請點此載入預覽", use_container_width=True)
 
 # 區塊 3：預覽與下載
@@ -110,7 +109,7 @@ if text_input:
                 pypandoc.convert_text(
                     text_input, 
                     'docx', 
-                    format='markdown', # 已經更新為容錯率更高的 markdown 模式
+                    format='markdown', 
                     outputfile=output_filename,
                     extra_args=extra_args
                 )
