@@ -53,8 +53,9 @@ def load_uploaded_file():
 with st.expander("💡 點我展開：使用說明與專屬 AI Prompt"):
     st.markdown("請在 ChatGPT、Claude 或 Gemini 等 AI 工具中，將以下指令加在問題的最後面，以確保產出的格式完美支援本系統：")
     prompt_text = """請將所有產出的內容放入單一個『程式碼區塊 (Code block)』中輸出，並嚴格遵守以下格式，以利後續程式解析：
-1. 排版保留：請使用標準 Markdown 語法處理文字排版（如 ### 標題、** 粗體、| 表格）。
-2. 數學公式：請一律使用標準 LaTeX 語法呈現（行內公式使用 $ $，獨立行公式使用 $$ $$）。"""
+1. 排版保留：請使用標準 Markdown 語法處理文字排版（如 ### 標題、** 粗體）。
+2. 表格規範：若有表格，請使用標準 Markdown 表格（| 表格 |），並且【表格的正上方與正下方，務必各保留一個空白行】。
+3. 數學公式：請一律使用標準 LaTeX 語法呈現（行內公式使用 $ $，獨立行公式使用 $$ $$）。"""
     st.code(prompt_text, language="markdown")
 
 st.divider()
@@ -109,7 +110,7 @@ if text_input:
                 pypandoc.convert_text(
                     text_input, 
                     'docx', 
-                    format='md', 
+                    format='markdown', # 已經更新為容錯率更高的 markdown 模式
                     outputfile=output_filename,
                     extra_args=extra_args
                 )
