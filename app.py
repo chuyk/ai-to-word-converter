@@ -104,10 +104,28 @@ if text_input:
                     extra_args.append('--reference-doc=two_columns_template.docx')
                 else:
                     st.warning("⚠️ 系統找不到 'two_columns_template.docx' 範本檔，將自動降級為預設單欄排版。請確認檔案已上傳至最外層目錄！")
-            
+
             with st.spinner("努力排版中，請稍候..."):
+                import re
+                
+                processed_lines = []
+                for line in text_input.splitlines():
+                    # 1. 修正括號空格消失：將 () 或 (   ) 統一換成 Word 不會壓縮的特殊不換行空格
+                    line = re.sub(r'\(\s*\)', '(\u00A0\u00A0\u00A0)', line)
+                    
+                    # 2. 修正文字黏在一起：如果是「題幹行」或「選項行」，在行末強制多補一個換行，讓 Word 完美分行
+                    # 判斷依據：包含格式化後的括號與題號（如 1.），或者是全形選項（如 （A））
+                    if re.search(r'\(\u00A0+\)\s*\d+\.', line) or re.search(r'（[A-D]）', line):
+                        line += "\n"
+                        
+                    processed_lines.append(line)
+                    
+                # 組合處理後的完美 Markdown 文本
+                final_processed_text = "\n".join(processed_lines)
+            
+                # 送入 Pandoc 轉出完美的 Word 檔
                 pypandoc.convert_text(
-                    text_input, 
+                    final_processed_text, 
                     'docx', 
                     format='markdown', 
                     outputfile=output_filename,
