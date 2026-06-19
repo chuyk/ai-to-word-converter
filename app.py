@@ -65,7 +65,6 @@ with col1:
                      on_change=load_uploaded_file)
 with col2:
     st.markdown("<br>", unsafe_allow_html=True) # 調整按鈕對齊高度
-    # 【修正痛點】使用強制重整 (rerun) 來解決清空按鈕被系統忽略的問題
     if st.button("🗑️ 一鍵清空", use_container_width=True):
         st.session_state["input_text"] = ""
         st.rerun()
@@ -99,31 +98,40 @@ if text_input:
     if st.button("🚀 開始轉換並準備下載", type="primary"):
         try:
             extra_args = []
+            
+            # === 字體與排版範本邏輯控制 ===
             if use_two_columns:
                 if os.path.exists("two_columns_template.docx"):
                     extra_args.append('--reference-doc=two_columns_template.docx')
                 else:
-                    st.warning("⚠️ 系統找不到 'two_columns_template.docx' 範本檔，將自動降級為預設單欄排版。請確認檔案已上傳至最外層目錄！")
-
+                    st.warning("⚠️ 系統找不到 'two_columns_template.docx' 範本檔，將自動降級為預設單欄排版。")
+                    if os.path.exists("default_template.docx"):
+                        extra_args.append('--reference-doc=default_template.docx')
+            else:
+                # 即使是單欄排版，只要有 default_template.docx，就強制套用（確保中英文字體正確）
+                if os.path.exists("default_template.docx"):
+                    extra_args.append('--reference-doc=default_template.docx')
+            
             with st.spinner("努力排版中，請稍候..."):
                 import re
                 
+                # 考卷排版美化預處理
                 processed_lines = []
                 for line in text_input.splitlines():
-                    # 1. 修正括號空格消失：將 () 或 (   ) 統一換成 Word 不會壓縮的特殊不換行空格
-                    line = re.sub(r'\(\s*\)', '(\u00A0\u00A0\u00A0)', line)
+                    # 1. 將半形 () 換成全形（  ），強制 Word 套用中文字型（標楷體）
+                    # \u3000 是標準全形空白，在標楷體下寬度最穩定、最漂亮
+                    line = re.sub(r'\(\s*\)', '（\u3000\u3000）', line)
                     
-                    # 2. 修正文字黏在一起：如果是「題幹行」或「選項行」，在行末強制多補一個換行，讓 Word 完美分行
-                    # 判斷依據：包含格式化後的括號與題號（如 1.），或者是全形選項（如 （A））
-                    if re.search(r'\(\u00A0+\)\s*\d+\.', line) or re.search(r'（[A-D]）', line):
+                    # 2. 修正文字黏在一起
+                    # 偵測包含全形括號與題號（如 1.），或者是全形選項（如 （A））
+                    if re.search(r'（\u3000+）\s*\d+\.', line) or re.search(r'（[A-D]）', line):
                         line += "\n"
                         
                     processed_lines.append(line)
                     
-                # 組合處理後的完美 Markdown 文本
                 final_processed_text = "\n".join(processed_lines)
-            
-                # 送入 Pandoc 轉出完美的 Word 檔
+
+                # 執行轉檔
                 pypandoc.convert_text(
                     final_processed_text, 
                     'docx', 
