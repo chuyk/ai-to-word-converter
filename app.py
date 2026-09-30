@@ -5,6 +5,11 @@ import re
 import urllib.request
 import tarfile
 import platform
+from docx import Document
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls, qn
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # =======================================================
 # 頁面配置與現代化風格
@@ -62,13 +67,74 @@ def ensure_pandoc_engine():
 engine_ready, engine_msg = ensure_pandoc_engine()
 
 # =======================================================
-# 核心優化演算法：智慧算式分流 (徹底解決 Word 複製貼上當機卡死)
+# 核心優化演算法：LaTeX 語法清理、排版預處理與智慧算式分流
 # =======================================================
+def clean_latex_math(text: str) -> str:
+    """
+    清理與標準化 LaTeX 數學公式，提升對各家 AI（ChatGPT, Claude, Gemini, DeepSeek）產出內容的相容性：
+    1. 將 \\[ ... \\] 標準化為 $$...$$，將 \\( ... \\) 標準化為 $...$
+    2. 移除字型大小控制指令：\\Large, \\large, \\Huge, \\huge, \\LARGE, \\normalsize, \\small, \\footnotesize, \\tiny
+    3. 將 \\textbf{}、\\boldsymbol{} 修正為 Word OMML 支援的 \\mathbf{}
+    4. 移除 $ 算式 $ 內頭尾多餘的空格（Pandoc 若看到 $ 緊接空格會拒絕辨識為公式）
+    """
+    # 1. AI 常見的 LaTeX 區塊標記標準化
+    text = re.sub(r'\\\[(.*?)\\\]', r'$$\1$$', text, flags=re.DOTALL)
+    text = re.sub(r'\\\((.*?)\\\)', r'$\1$', text, flags=re.DOTALL)
+
+    # 2. 清除公式頭尾多餘空格（如「$ x = 1 $」修復為「$x = 1$」）
+    text = re.sub(r'(?<!\$)\$\s+(.*?)\s+\$(?!\$)', r'$\1$', text)
+
+    def sanitize(match):
+        content = match.group(1)
+        # 移除字體大小修飾詞
+        content = re.sub(r'\\(Huge|huge|LARGE|Large|large|normalsize|small|footnotesize|tiny)\b\s*', '', content)
+        # 修正加粗語法為 OMML 支援的 \mathbf
+        content = re.sub(r'\\textbf\{', r'\\mathbf{', content)
+        content = re.sub(r'\\boldsymbol\{', r'\\mathbf{', content)
+        delimiter = "$$" if match.group(0).startswith("$$") else "$"
+        return f"{delimiter}{content.strip()}{delimiter}"
+
+    # 先替換獨立行公式 $$...$$
+    text = re.sub(r'\$\$(.*?)\$\$', sanitize, text, flags=re.DOTALL)
+    # 再替換行內公式 $...$
+    text = re.sub(r'(?<!\$)\$(?!\$)(.*?)(?<!\$)\$(?!\$)', sanitize, text)
+    return text
+
+def format_all_tables(doc):
+    """為 Word 檔中的所有表格添加標準實線黑框線、置中對齊、儲存格垂直置中與跨頁防斷裂。"""
+    for table in doc.tables:
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        tblPr = table._tbl.tblPr
+        borders = parse_xml(f'''
+            <w:tblBorders {nsdecls("w")}>
+                <w:top w:val="single" w:sz="6" w:space="0" w:color="000000"/>
+                <w:left w:val="single" w:sz="6" w:space="0" w:color="000000"/>
+                <w:bottom w:val="single" w:sz="6" w:space="0" w:color="000000"/>
+                <w:right w:val="single" w:sz="6" w:space="0" w:color="000000"/>
+                <w:insideH w:val="single" w:sz="6" w:space="0" w:color="000000"/>
+                <w:insideV w:val="single" w:sz="6" w:space="0" w:color="000000"/>
+            </w:tblBorders>
+        ''')
+        old_borders = tblPr.find(qn('w:tblBorders'))
+        if old_borders is not None:
+            tblPr.remove(old_borders)
+        tblPr.append(borders)
+
+        for row in table.rows:
+            trPr = row._tr.get_or_add_trPr()
+            trPr.append(parse_xml(f'<w:cantSplit {nsdecls("w")}/>'))
+            for cell in row.cells:
+                tcPr = cell._tc.get_or_add_tcPr()
+                vAlign = parse_xml(f'<w:vAlign {nsdecls("w")} w:val="center"/>')
+                tcPr.append(vAlign)
+                for p in cell.paragraphs:
+                    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
 def optimize_math_markdown(text: str, enable_optimization: bool = True) -> tuple[str, int, int]:
     """
     將 Markdown 中的 LaTeX 算式進行智慧分流：
-    1. 複合結構（分數、根號、幾何線段、上下標、特殊符號等）-> 保留為 $...$，交由 Pandoc 轉為 Word 原生 OMML。
-    2. 簡易純數值、單一字母、簡易等式、選項代號 -> 脫殼轉為一般純文字，避免 Word 生成數百個方程式物件造成剪貼簿與貼上卡死。
+    1. 複合結構（分數、根號、幾何線段、上下標、特殊符號、箭頭、不等式等）-> 保留為 $...$，交由 Pandoc 轉為 Word 原生 OMML。
+    2. 簡易純數值、單一字母、選項代號 -> 脫殼轉為一般純文字，避免 Word 生成數百個方程式物件造成剪貼簿與貼上卡死。
     
     返回: (處理後的文字, 簡化脫殼的數量, 保留為方程式的數量)
     """
@@ -79,14 +145,16 @@ def optimize_math_markdown(text: str, enable_optimization: bool = True) -> tuple
     complex_math_patterns = [
         r'\\frac', r'\\dfrac', r'\\tfrac',   # 分數
         r'\\sqrt',                          # 根號
-        r'\\overline', r'\\overleftrightarrow', r'\\overrightarrow', # 幾何線段、直線、射線
-        r'\\angle', r'\\triangle',          # 角度、三角形
+        r'\\overline', r'\\overleftrightarrow', r'\\overrightarrow', r'\\widehat', r'\\vec', # 幾何線段、直線、射線、向量
+        r'\\angle', r'\\triangle', r'\\odot', # 角度、三角形、圓
         r'\\sim', r'\\cong', r'\\perp', r'\\parallel', # 相似、全等、垂直、平行
         r'\\pm', r'\\mp',                   # 正負號
         r'\\times', r'\\div', r'\\cdot',    # 乘除符號
-        r'\\le', r'\\ge', r'\\neq', r'\\approx', r'\\equiv', # 不等式與約等於
-        r'\\sum', r'\\int', r'\\lim', r'\\infty', # 高階微積分/級數
-        r'\\pi', r'\\alpha', r'\\beta', r'\\theta', r'\\lambda', # 希臘字母
+        r'\\le\b', r'\\ge\b', r'\\neq\b', r'\\approx\b', r'\\equiv\b', r'<', r'>', # 不等式、大小關係與約等於
+        r'\\sum', r'\\prod', r'\\int', r'\\iint', r'\\lim', r'\\infty', # 高階微積分/級數
+        r'\\to\b', r'\\rightarrow\b', r'\\Rightarrow\b', r'\\implies\b', r'\\iff\b', r'\\Leftarrow\b', r'\\leftarrow\b', r'\\Leftrightarrow\b', r'\\mapsto\b', # 箭頭與推論符號
+        r'\\therefore\b', r'\\because\b',   # 所以、因為
+        r'\\pi\b', r'\\alpha\b', r'\\beta\b', r'\\theta\b', r'\\lambda\b', r'\\sigma\b', r'\\omega\b', r'\\Delta\b', # 希臘字母
         r'\^',                              # 上標 / 次方 (如 x^2, 3^2)
         r'_',                               # 下標 (如 a_1, x_n)
         r'\\{', r'\\}',                     # 集合括號
@@ -118,18 +186,23 @@ def optimize_math_markdown(text: str, enable_optimization: bool = True) -> tuple
             preserved_count += 1
             return f"${content}$"
             
-        # 簡易純數字（如 $2$, $-5$, $24$）或純選項（如 $(A)$, $(B)$）
-        # 或純字母（如 $x$, $y$, $a, b, c$）、簡單比較（如 $a = b$, $b > a$）
-        # 進行符號清理轉換為輕量文字
+        # 進行符號清理轉換嘗試
         s = content
         s = s.replace(r'\,', ' ')
         s = s.replace(r'\;', ' ')
         s = s.replace(r'\quad', '  ')
         s = s.replace(r'\qquad', '   ')
-        s = s.replace(r'\text{', '').replace('}', '')
-        s = s.replace(r'\rm{', '').replace('}', '')
+        s = re.sub(r'\\text\{([^}]*)\}', r'\1', s)
+        s = re.sub(r'\\rm\{([^}]*)\}', r'\1', s)
         s = s.replace(r'\degree', '°')
         s = s.replace(r'^\circ', '°')
+
+        # 防禦性檢查：若字串中仍殘留未被轉換的反斜線 LaTeX 指令（如 \xxx），絕對不可脫殼！
+        # 否則 Pandoc 會將其視為 raw tex 在輸出 docx 時丟棄或產生亂碼
+        if re.search(r'\\[a-zA-Z]+', s):
+            preserved_count += 1
+            return f"${content}$"
+        
         s = re.sub(r'(?<=\d)\s*-\s*(?=\d)', '－', s)
         s = re.sub(r'^\s*-\s*', '－', s) # 開頭負號
         
@@ -147,18 +220,55 @@ def optimize_math_markdown(text: str, enable_optimization: bool = True) -> tuple
     return processed_text, simplified_count, preserved_count
 
 def preprocess_exam_text(text: str) -> str:
-    """考卷文字排版美化預處理：括號標準化與換行防黏連。"""
+    """考卷文字排版美化預處理：表格、清單防黏連、括號標準化。"""
     # 移除使用者若不小心貼上程式碼區塊外框
     text = re.sub(r'^```[a-zA-Z]*\n', '', text.strip())
     text = re.sub(r'\n```$', '', text.strip())
 
+    lines = text.splitlines()
     processed_lines = []
-    for line in text.splitlines():
-        # 1. 將半形 ()、( ) 換成全形標準手寫作答括號（　　），含兩個全形空白 \u3000\u3000
+    in_table = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        # 1. 表格防黏連：進入表格前若上一行非空行且非表格，自動補空行確保 Pandoc 辨識為表格
+        if stripped.startswith("|") and stripped.endswith("|"):
+            if not in_table:
+                if processed_lines and processed_lines[-1].strip() != "":
+                    processed_lines.append("")
+                in_table = True
+        else:
+            in_table = False
+
+        # 2. 移除清單中多餘的符號（例如「- (1)」會讓 Word 產生空圓點，標準化為「(1)」）
+        line = re.sub(r'^(\s*)[-*+]\s*(\(\d+\))', r'\1\2', line)
+
+        # 3. 清單防黏連：若當前行為清單項且上一行是一般內文段落，補空行防黏連成單一段落
+        is_list = bool(re.match(r'^(\s*[-*+]|\s*\d+\.)\s+', line))
+        if is_list and not in_table:
+            if processed_lines:
+                prev = processed_lines[-1].strip()
+                prev_is_list = bool(re.match(r'^(\s*[-*+]|\s*\d+\.)\s+', processed_lines[-1]))
+                prev_is_heading = prev.startswith("#")
+                if prev != "" and not prev_is_list and not prev_is_heading:
+                    processed_lines.append("")
+
+        # 4. 引言區塊 (>) 內清單防黏連
+        if stripped.startswith(">"):
+            inner = re.sub(r'^>\s*', '', stripped)
+            is_inner_list = bool(re.match(r'^([-*+]|\d+\.)\s+', inner))
+            if is_inner_list and processed_lines:
+                prev_inner = re.sub(r'^>\s*', '', processed_lines[-1].strip())
+                prev_is_inner_list = bool(re.match(r'^([-*+]|\d+\.)\s+', prev_inner))
+                if prev_inner != "" and not prev_is_inner_list and not prev_inner.startswith("#"):
+                    processed_lines.append("> ")
+
+        # 5. 作答括號標準化：將半形 ()、( ) 換成全形標準手寫作答括號（　　）
         line = re.sub(r'\(\s*\)', '（\u3000\u3000）', line)
         line = re.sub(r'（\s*）', '（\u3000\u3000）', line)
         
-        # 2. 修正題號與作答括號黏在同一行問題
+        # 6. 修正題號與作答括號黏在同一行問題
         if re.search(r'（\u3000+）\s*\d+\.', line) or re.search(r'（[A-D]）', line):
             line += "\n"
             
@@ -361,8 +471,9 @@ if text_input.strip():
                     else:
                         st.warning(f"⚠️ 找不到範本檔 {template_name}，將使用 Pandoc 預設排版樣式。")
 
-                    # 2. 考卷文字排版預處理（作答括號全形化、防黏連）
-                    preprocessed_text = preprocess_exam_text(text_input)
+                    # 2. 清理 LaTeX 不相容修飾詞與考卷文字排版預處理（作答括號全形化、表格與清單防黏連）
+                    cleaned_text = clean_latex_math(text_input)
+                    preprocessed_text = preprocess_exam_text(cleaned_text)
                     
                     # 3. 智慧算式分流（核心防卡死處理）
                     optimized_text, simp_count, pres_count = optimize_math_markdown(
@@ -386,6 +497,14 @@ if text_input.strip():
                         outputfile=output_file_path,
                         extra_args=extra_args
                     )
+
+                    # 6. 後處理：表格美化（為所有表格添加標準考卷黑框線、垂直居中與防斷裂）
+                    try:
+                        doc = Document(output_file_path)
+                        format_all_tables(doc)
+                        doc.save(output_file_path)
+                    except Exception:
+                        pass
 
                 st.success("🎉 轉檔成功！已套用高規格標楷體 13pt 與專業考卷排版。")
                 
